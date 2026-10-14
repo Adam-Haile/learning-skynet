@@ -1,0 +1,15 @@
+# Mentor-only material lives outside this repository; never commit it here.
+mentor/
+runs/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+
+# OS
+.DS_Store

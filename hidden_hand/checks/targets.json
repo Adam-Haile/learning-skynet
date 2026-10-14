@@ -1,0 +1,319 @@
+{
+  "source": "Mentor reference runs on Rosie, 2026-10-13: 5 seeds per model, 1000 iterations, default Hidden Hand (own-score rewards, high-card draw pile), MCTS 8->12->16 simulations in training and greedy MCTS with 16 simulations in evaluation",
+  "losses": {
+    "loss_policy": {
+      "max_ratio": 1.0,
+      "ref_min": 0.667,
+      "ref_max": 0.794
+    },
+    "loss_value": {
+      "max_ratio": 1.0,
+      "ref_min": 0.824,
+      "ref_max": 0.879
+    },
+    "loss_reward": {
+      "max_ratio": 1.0,
+      "ref_min": 0.569,
+      "ref_max": 0.647
+    },
+    "loss_winner": {
+      "max_ratio": 1.142,
+      "ref_min": 0.977,
+      "ref_max": 1.042
+    },
+    "loss_rank": {
+      "max_ratio": 1.141,
+      "ref_min": 0.975,
+      "ref_max": 1.041
+    }
+  },
+  "muzero_vs_bots": {
+    "random": {
+      "min": 0.428,
+      "max": 0.525,
+      "pass_min": 0.357,
+      "ref_mean": 0.477,
+      "ref_std": 0.024,
+      "n_seeds": 5
+    },
+    "greedy": {
+      "min": 0.54,
+      "max": 0.596,
+      "pass_min": 0.448,
+      "ref_mean": 0.568,
+      "ref_std": 0.014,
+      "n_seeds": 5
+    },
+    "tell_reader": {
+      "min": 0.257,
+      "max": 0.387,
+      "pass_min": 0.202,
+      "ref_mean": 0.322,
+      "ref_std": 0.033,
+      "n_seeds": 5
+    }
+  },
+  "skynet_vs_bots": {
+    "random": {
+      "min": 0.43,
+      "max": 0.67,
+      "pass_min": 0.37,
+      "ref_mean": 0.55,
+      "ref_std": 0.06,
+      "n_seeds": 5
+    },
+    "greedy": {
+      "min": 0.629,
+      "max": 0.729,
+      "pass_min": 0.559,
+      "ref_mean": 0.679,
+      "ref_std": 0.025,
+      "n_seeds": 5
+    },
+    "tell_reader": {
+      "min": 0.268,
+      "max": 0.46,
+      "pass_min": 0.221,
+      "ref_mean": 0.364,
+      "ref_std": 0.048,
+      "n_seeds": 5
+    }
+  },
+  "probes": {
+    "opp_hidden_sum": {
+      "kind": "hidden",
+      "skynet": {
+        "min_r2": 0.076,
+        "ref_min": 0.153,
+        "ref_max": 0.241
+      },
+      "muzero": {
+        "min_r2": 0.099,
+        "ref_min": 0.198,
+        "ref_max": 0.242
+      }
+    },
+    "total_diff": {
+      "kind": "hidden",
+      "skynet": {
+        "min_r2": 0.131,
+        "ref_min": 0.262,
+        "ref_max": 0.438
+      },
+      "muzero": {
+        "min_r2": 0.17,
+        "ref_min": 0.341,
+        "ref_max": 0.43
+      }
+    },
+    "own_known_sum": {
+      "kind": "observable",
+      "skynet": {
+        "min_r2": 0.452,
+        "ref_min": 0.904,
+        "ref_max": 0.966
+      },
+      "muzero": {
+        "min_r2": 0.483,
+        "ref_min": 0.967,
+        "ref_max": 0.984
+      }
+    }
+  },
+  "head_to_head": {
+    "min": 0.514,
+    "max": 0.82,
+    "pass_min": 0.437,
+    "ref_mean": 0.667,
+    "ref_std": 0.077,
+    "n_seeds": 5
+  },
+  "crossover": {
+    "50": {
+      "min": 0.46,
+      "max": 0.6,
+      "pass_min": 0.41,
+      "ref_mean": 0.53,
+      "ref_std": 0.035,
+      "n_seeds": 5
+    },
+    "100": {
+      "min": 0.486,
+      "max": 0.704,
+      "pass_min": 0.432,
+      "ref_mean": 0.595,
+      "ref_std": 0.054,
+      "n_seeds": 5
+    },
+    "150": {
+      "min": 0.572,
+      "max": 0.804,
+      "pass_min": 0.514,
+      "ref_mean": 0.688,
+      "ref_std": 0.058,
+      "n_seeds": 5
+    },
+    "200": {
+      "min": 0.711,
+      "max": 0.786,
+      "pass_min": 0.629,
+      "ref_mean": 0.749,
+      "ref_std": 0.019,
+      "n_seeds": 5
+    },
+    "250": {
+      "min": 0.631,
+      "max": 0.791,
+      "pass_min": 0.591,
+      "ref_mean": 0.711,
+      "ref_std": 0.04,
+      "n_seeds": 5
+    },
+    "300": {
+      "min": 0.594,
+      "max": 0.805,
+      "pass_min": 0.541,
+      "ref_mean": 0.699,
+      "ref_std": 0.053,
+      "n_seeds": 5
+    },
+    "350": {
+      "min": 0.554,
+      "max": 0.734,
+      "pass_min": 0.508,
+      "ref_mean": 0.644,
+      "ref_std": 0.045,
+      "n_seeds": 5
+    },
+    "400": {
+      "min": 0.567,
+      "max": 0.757,
+      "pass_min": 0.52,
+      "ref_mean": 0.662,
+      "ref_std": 0.048,
+      "n_seeds": 5
+    },
+    "450": {
+      "min": 0.504,
+      "max": 0.754,
+      "pass_min": 0.442,
+      "ref_mean": 0.629,
+      "ref_std": 0.062,
+      "n_seeds": 5
+    },
+    "500": {
+      "min": 0.498,
+      "max": 0.739,
+      "pass_min": 0.438,
+      "ref_mean": 0.618,
+      "ref_std": 0.06,
+      "n_seeds": 5
+    },
+    "550": {
+      "min": 0.494,
+      "max": 0.718,
+      "pass_min": 0.439,
+      "ref_mean": 0.606,
+      "ref_std": 0.056,
+      "n_seeds": 5
+    },
+    "600": {
+      "min": 0.525,
+      "max": 0.641,
+      "pass_min": 0.463,
+      "ref_mean": 0.583,
+      "ref_std": 0.029,
+      "n_seeds": 5
+    },
+    "650": {
+      "min": 0.522,
+      "max": 0.693,
+      "pass_min": 0.479,
+      "ref_mean": 0.608,
+      "ref_std": 0.043,
+      "n_seeds": 5
+    },
+    "700": {
+      "min": 0.563,
+      "max": 0.697,
+      "pass_min": 0.51,
+      "ref_mean": 0.63,
+      "ref_std": 0.034,
+      "n_seeds": 5
+    },
+    "750": {
+      "min": 0.503,
+      "max": 0.745,
+      "pass_min": 0.442,
+      "ref_mean": 0.624,
+      "ref_std": 0.061,
+      "n_seeds": 5
+    },
+    "800": {
+      "min": 0.508,
+      "max": 0.729,
+      "pass_min": 0.452,
+      "ref_mean": 0.619,
+      "ref_std": 0.055,
+      "n_seeds": 5
+    },
+    "850": {
+      "min": 0.597,
+      "max": 0.718,
+      "pass_min": 0.538,
+      "ref_mean": 0.658,
+      "ref_std": 0.03,
+      "n_seeds": 5
+    },
+    "900": {
+      "min": 0.552,
+      "max": 0.718,
+      "pass_min": 0.511,
+      "ref_mean": 0.635,
+      "ref_std": 0.041,
+      "n_seeds": 5
+    },
+    "950": {
+      "min": 0.526,
+      "max": 0.816,
+      "pass_min": 0.454,
+      "ref_mean": 0.671,
+      "ref_std": 0.072,
+      "n_seeds": 5
+    },
+    "1000": {
+      "min": 0.514,
+      "max": 0.82,
+      "pass_min": 0.437,
+      "ref_mean": 0.667,
+      "ref_std": 0.077,
+      "n_seeds": 5
+    }
+  },
+  "ablation": {
+    "zero_ego": {
+      "min": 0.479,
+      "max": 0.697,
+      "pass_min": 0.424,
+      "ref_mean": 0.588,
+      "ref_std": 0.055,
+      "n_seeds": 5
+    },
+    "ego_only": {
+      "min": 0.544,
+      "max": 0.926,
+      "pass_min": 0.5,
+      "ref_mean": 0.735,
+      "ref_std": 0.096,
+      "n_seeds": 5
+    },
+    "none": {
+      "min": 0.586,
+      "max": 0.898,
+      "pass_min": 0.508,
+      "ref_mean": 0.742,
+      "ref_std": 0.078,
+      "n_seeds": 5
+    }
+  }
+}

@@ -1,0 +1,24 @@
+[project]
+name = "hidden-hand"
+version = "0.1.0"
+description = "Hidden Hand: a toy stochastic, partially observable card game and quality checks for rebuilding SkyNet (Belief-Aware MuZero)."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hidden_hand*"]
+
+[tool.setuptools.package-data]
+hidden_hand = ["checks/targets.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
