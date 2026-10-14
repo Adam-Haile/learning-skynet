@@ -298,9 +298,14 @@ an independent implementation with different hyperparameters has room.
 
 These come from the mentor's reference runs: 5 seeds per model, 1000 iterations, each
 iteration 256 self-play games and 96 gradient steps of batch 64, MCTS with 8 → 12 → 16
-simulations during training and 16 at evaluation. All ten runs take about 5 hours sharing
-one T4, with self-play on CPU cores. The numbers are also in
+simulations during training and 16 at evaluation. The numbers are also in
 [`hidden_hand/checks/targets.json`](hidden_hand/checks/targets.json).
+
+**How long training takes.** The ten reference runs trained at the same time on one Rosie
+node: one T4 for the gradient steps and 40 CPU cores for self-play, about 4 cores per run. Each
+MuZero run took 4.2–4.4 hours and each SkyNet run 4.7–4.9 hours, about 16–17 seconds per
+iteration. The whole batch finished in about 5 hours. Iteration 200, where SkyNet's lead peaks,
+arrives after about an hour.
 
 **SkyNet's score against MuZero at matched checkpoints** (mean of 5 seeds):
 
