@@ -17,7 +17,6 @@ checks, write it down: those notes feed the reproducibility section of our paper
 
 - Paper: Haile, *SkyNet: Belief-Aware Planning in Partially Observable Stochastic Games*,
   ICANN 2026. https://doi.org/10.1007/978-3-032-38404-1_9
-- Repo: https://github.com/DevArtech/skynet (read it *after* your own first build, then diff)
 
 ## Install
 
@@ -31,40 +30,111 @@ models (PyTorch is what the repo uses).
 
 ## Rules
 
-Each player is dealt 4 face-down cards from a deck with four each of 0–9, and privately
-knows 1 of the 4 at the start. **Lowest total wins.**
+**In one paragraph.** Two players each hold four face-down cards. **Lowest total wins.** You
+only know some of your own cards and none of your opponent's. The low cards are potentially in the two
+hands; the draw pile holds only high cards. So the main way to improve is to **trade your worst
+card for one of the opponent's cards**, without seeing either card. To choose which card to take,
+you read **tells**: noisy public hints that appear whenever someone looks at one of their own cards.
 
-The **draw pile** is separate and holds only high cards (four each of 5–9). Drawing rarely
-improves your hand. The low cards are in the two hands, and the way to get one is to take
-it from your opponent.
+### The cards
 
-Your **worst card** is the one you would most like to get rid of: your highest known card,
-or one of your unknown cards if every known card is below 4.5. Unknown cards count as 4.5.
+- **The deal.** Four copies of each value 0–9 (40 cards) are shuffled. Each player is dealt 4
+  cards face down into **slots 0–3**. The other 32 cards are not used. A dealt card averages 4.5.
+- **The draw pile** is a separate stack of 20 high cards, four each of 5–9, averaging 7. A game
+  draws at most 16 cards, so it never runs out.
+- **The discard pile** is face up. Every card that goes there is public.
 
-Every turn begins with a **chance event**: you draw the top card of the draw pile and look
-at it privately. Then you take exactly one action:
+### What you know
 
-| id | action | effect |
-|---|---|---|
-| 0 | `KEEP` | put the drawn card in place of your worst card; the old card goes face-up on the discard pile |
-| 1 | `PEEK` | privately look at one of your unknown cards (legal only if you have one) |
-| 2–5 | `TRADE(j)` | blindly swap your worst card with the opponent's card at position `j` |
-| 6 | `CALL` | end the game now (legal from your 3rd turn) |
+Each card in a hand is either *seen* or *unseen* by each player:
 
-- Unless you `KEEP`, the drawn card is discarded face-up.
-- **Tells.** Whenever someone looks at a card in their hand (`PEEK`, or the card they
-  `KEEP`), the table sees a tell: `HIGH` if the card is ≥ 5, otherwise `LOW`. Each tell
-  is wrong 25% of the time. Looking at your own cards therefore leaks where your low
-  cards are.
-- **Trades are blind.** Nobody looks at anything; whoever knew a card keeps knowing it. After
-  a trade you know the card you gave away, and you do not know the card you received.
-- The game ends on a `CALL`, or after both players have taken 8 turns (at most 16 decisions).
-- **Caller penalty (as in Skyjo).** If the caller is not strictly lowest, their score doubles.
-- Ties are draws.
+- At the start each player privately looks at **one random card of their own**. The table sees a
+  tell for it (shown as `deal` in the history).
+- You learn more of your own cards by `PEEK` and by `KEEP` (you know the card you keep).
+- You **never look at your opponent's cards**. The only opponent cards you can know are ones that
+  used to be yours, seen by you, before the opponent traded for them.
+- **Knowledge stays with the card, not the slot.** When a card changes hands in a trade, whoever
+  knew it still knows it, wherever it goes.
+- The card you draw is private while you decide. Unless you keep it, it then goes face up on
+  the discard pile.
 
-Why the belief matters: picking *which* opponent card to trade for depends on what you
-believe about the opponent's hidden cards. A bot that reads tells and trades beats one
-that only manages its own hand about 3 games in 4.
+Everything else is public: every action, which slots it touched, every tell and every discard.
+
+### A turn
+
+The first player is chosen at random, then players alternate. A turn has two parts:
+
+1. **Draw** (a chance event). Take the top card of the draw pile and look at it privately.
+2. **Act.** Take exactly one of these actions:
+
+| id | action | what happens | what the table learns |
+|---|---|---|---|
+| 0 | `KEEP` | The drawn card replaces your **worst card** (below). The old card goes face up on the discard pile. | The old card's value, and a tell about the kept card. |
+| 1 | `PEEK` | You look at your **leftmost unseen card**; you don't pick which. The drawn card is discarded. Legal only while you have an unseen card. | A tell about that card, and the discarded draw. |
+| 2–5 | `TRADE(j)` | Your **worst card** swaps places with the opponent's card in slot `j`. Neither card is looked at. The drawn card is discarded. | Which two slots swapped, and the discarded draw. No tell. |
+| 6 | `CALL` | The game ends immediately; the opponent gets no last turn. The drawn card is discarded. Legal from your 3rd turn. | That you called. |
+
+### Your worst card
+
+`KEEP` and `TRADE` don't let you choose which of your cards leaves. They always replace your
+**worst card**, the one you would most like to get rid of. Unseen cards count as 4.5 (the
+average dealt card):
+
+- your **highest seen card**, if it is 5 or more;
+- otherwise your **leftmost unseen card**;
+- if you have seen all four cards, your highest card. On ties, the leftmost.
+
+For example, holding `[?, 8, ?, ?]` your worst card is the 8 in slot 1. Holding `[?, 4, ?, ?]`
+it is the unseen card in slot 0. The game window marks it `▲ worst`.
+
+### Tells
+
+Each time a player looks at a card in their own hand (the opening look, a `PEEK`, or the card
+they `KEEP`), everyone sees a tell for that card: `HIGH` (5–9) or `LOW` (0–4). **A tell is wrong
+25% of the time.**
+
+- Half the dealt cards are low, so after a `LOW` tell a card is low with 75% probability. It is
+  worth 3.25 on average, against 5.75 after a `HIGH` tell and 4.5 with no tell. The latest tell
+  about a card is the best guess about it.
+- A tell describes the **card**, not the slot. If the card is traded, the tell goes with it.
+  Following tells through trades is what the `tell_reader` bot does.
+- A `KEEP` tell says nothing new with the default draw pile: everyone knows a kept card is 5–9.
+- Looking at your own cards leaks information. A `LOW` tell tells your opponent where your
+  good card is.
+
+### End of the game and scoring
+
+- The game ends when someone **calls**, or when both players have taken **8 turns** (16 turns in
+  total).
+- Your **score** is the sum of your four cards, seen or not. **Lower wins**; equal scores are a draw.
+- **Caller penalty (as in Skyjo).** If the caller's total is not *strictly* lower than the
+  opponent's, the caller's score is **doubled**. Ties count against the caller. A call at
+  12 vs 12 scores 24 vs 12, and the caller loses. Only call when you are fairly sure you are ahead.
+
+### A worked example
+
+P0 holds `[3, 8, 1, 6]` and has seen only the 8. P1 holds `[7, 0, 9, 2]` and has seen only the
+0, which gave a `LOW` tell at the deal. P0 draws a 6. P0's worst card is the seen 8 in slot 1.
+
+- **`KEEP`:** the 6 replaces the 8. The 8 goes face up on the discard pile, and the table sees a
+  tell about the 6.
+- **`PEEK`:** P0 looks at slot 0 (the leftmost unseen card) and finds the 3. The table sees a tell,
+  and the 6 is discarded.
+- **`TRADE(1)`:** P0 targets P1's slot 1, the card with the `LOW` tell. The cards swap: P0 now has
+  the 0 in slot 1 but has not seen it. P1 has P0's 8 in slot 1, and **P0 knows it is an 8**.
+  P1 still knows where its 0 went, so **P1 knows P0's slot 1 is a 0**. The 6 is discarded.
+
+Say P0 traded. P1 draws a 5. P1 has seen none of its current cards, so its worst card is its
+leftmost unseen card, the 7 in slot 0. P1 knows exactly where its 0 is, so it plays `TRADE(1)` and
+takes it back. P0's slot 1 now holds the 7, which neither player has seen yet. Trading for a card
+your opponent has seen tells them what you now hold.
+
+### Why the belief matters
+
+Picking *which* opponent card to trade for depends on what you believe about the opponent's
+hidden cards. That belief comes from tells, trades and discards spread across the whole
+history. A bot that reads tells and trades beats one that only manages its own hand about
+3 games in 4.
 
 ## Using the environment
 
@@ -135,6 +205,43 @@ observation.
 ignores the opponent) or `tell_reader` (tracks tells through trades, trades for the
 opponent card that looks lowest, calls when it believes it is ahead). Each has
 `select_action(obs, legal_actions)`.
+
+### Watching and playing games
+
+`python -m hidden_hand.play P0 P1` plays games between two players. Each player is a bot
+name (`random`, `greedy`, `tell_reader`), `human`, or a `module:factory` for your own agent
+(the same factories and agent interface as the quality checks). Add `--vis` to open a game
+window that draws the table after every move:
+
+```bash
+python -m hidden_hand.play greedy tell_reader --vis
+```
+
+```bash
+python -m hidden_hand.play human tell_reader --vis
+```
+
+```bash
+python -m hidden_hand.play my_pkg.agents:load_skynet my_pkg.agents:load_muzero --vis --games 5
+```
+
+- **Spectators** (no human playing) see every card, chips under each card showing which players
+  know it, the card just drawn, and in the history panel whether each tell was true (✓) or
+  wrong (✗).
+- **A human** sees only their own view, the same information as `env.observe(p)`. Every
+  card is revealed when the game ends. To move, use the buttons, click an opponent card to
+  trade for it, or press `k` keep, `p` peek, `0`–`3` trade, `c` call. With `human human`
+  the view follows the player to move, with a hand-off screen between turns.
+- Cards the last move touched have a gold border. `▲ worst` marks the card that `KEEP` and
+  `TRADE` would replace.
+- Controls: **Pause** (Space), **Step ▸** (Right arrow) and a delay slider for bot and agent
+  moves, and **Next game**. `--delay` sets the starting delay (default 1 s), `--paused` starts
+  paused, `--view all|0|1` overrides whose cards are shown, and `--seed` and `--games` pick the games.
+
+The window uses tkinter from the standard library. If your Python lacks it, install it
+(`brew install python-tk`, `apt install python3-tk`). On a machine without a display, leave out
+`--vis`: each move is then one line of text, which also suits long runs, e.g.
+`python -m hidden_hand.play greedy tell_reader --games 200` ends with a win tally.
 
 ## Running the quality checks
 
@@ -237,8 +344,8 @@ The lead opens early, peaks around iteration 200, narrows in mid-training and re
 - **MuZero is weak on this game.** The reference MuZero is close to coin-flip level against
   `random`. That is why the Tier 2 thresholds are low: they confirm your MuZero matches the
   reference, not that it is strong. Why MuZero struggles here while SkyNet does not is the
-  first thing to work out as a group, and whether the comparison is a fair one is a question
-  to carry into the Scope phase.
+  first thing to work out, and whether the comparison is a fair one is a question to carry 
+  into the Scope phase.
 - **The ablation ordering reproduces the paper** (full > zero-ego ≫ ego-only ≈ none) in
   four of five reference seeds.
 - **The probes differ from the paper.** In the paper only the ego-conditioned latent decodes
@@ -253,6 +360,9 @@ The lead opens early, peaks around iteration 200, narrows in mid-training and re
 hidden_hand/
   env.py        the game
   bots.py       random / greedy / tell_reader
+  play.py       python -m hidden_hand.play: watch or play games (--vis for a window)
+  vis.py        what each seat sees: the model the window draws
+  window.py     the game window (tkinter)
   checks/       quality-check harness, stats (Wilson CI, ridge probe), targets.json
 tests/          rule and interface tests
 ```

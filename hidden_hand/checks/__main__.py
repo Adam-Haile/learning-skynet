@@ -13,20 +13,12 @@ that returns an agent (see README.md for the agent interface).
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from pathlib import Path
 
 from hidden_hand.checks.harness import run_checks
-
-
-def _load_factory(spec: str):
-    module_name, _, attr = spec.partition(":")
-    if not attr:
-        raise SystemExit(f"Expected module:function, got {spec!r}")
-    sys.path.insert(0, str(Path.cwd()))
-    return getattr(importlib.import_module(module_name), attr)
+from hidden_hand.play import load_factory as _load_factory
 
 
 def main() -> None:
