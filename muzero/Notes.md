@@ -38,3 +38,13 @@ This is the planning part of the Muzero archtiecture.  This tree allows us to lo
 5. Pass that judgment back up the path, so every move along it learns "this line looked good (or bad)."
 6. Repeat, 16 times in the config (num_simulations, mcts.py:27).
 
+## Training
+Muzero plays against itself with the current network and the MCTS, and as it plays against the bots it addds the games to a replay buffer to view the previous game/step outcomes.  From here is then takes steps in gradient decent to maximize the rewards from the models within the architecture. 
+
+During training we unroll the Dynamics model for 5 steps. Starting from the latent state (step 0) produced by Representation, we apply Dynamics using the actions that were actually played during a game, feeding each output state back in as the next input. At every step, the predicted policy, value and reward are compared against the real game's results. This trains Dynamics to stay accurate over multiple steps of its own predictions, which is how it's used in MCTS. Because the loss only checks policy, value and reward, and never compares to the real game state, the latent states end up holding whatever information those predictions need. 
+
+## Encoding
+The observation becomes 31 tokens: 8 board cards, a discard token, a global token, a decision token, and up to 20 history tokens. Everything is expressed relative to the observer ("own" vs "opponent"), so the same weights work for both seats. It also uses obs["tokens"] only, which contains nothing hidden.
+
+## Temperature
+Controls the exploration the model does during training.  Makes the model more random at first, and then more greedy as training moves on. 
