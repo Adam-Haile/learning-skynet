@@ -1,6 +1,12 @@
 import math
 import torch
 
+from MuZero.public_rules import (
+    initial_public_state,
+    advance_public_state,
+    future_legal_actions
+)
+
 class Node:
     def __init__(self, prior=0.0):
         # Probability of selecting the action leading to this node
@@ -25,6 +31,8 @@ class Node:
         self.player = None
 
         self.terminal = False
+
+        self.public_state = None
 
     def value(self, player):
         if self.visit_count == 0:
@@ -118,8 +126,17 @@ def backpropagate(search_path, value, discount=1.0):
             current_values[0] = reward[0] + discount * current_values[0]
             current_values[1] = reward[1] + discount * current_values[1]
 
-def run_mcts(model, encoded_observation, legal_actions, current_player,
-             num_simulations=16, max_depth=4, discount=1.0):
+def run_mcts(
+    model,
+    encoded_observation,
+    legal_actions,
+    current_player,
+    num_simulations=16,
+    max_depth=4,
+    discount=1.0,
+    observation=None,
+    game_config=None
+):
     """Search from one real observation; return the selected action and tree.
 
     This baseline assumes the default Hidden Hand rules:
@@ -136,6 +153,9 @@ def run_mcts(model, encoded_observation, legal_actions, current_player,
 
     if num_simulations < 1 or max_depth < 1:
         raise ValueError("Simulations and depth must be positive.")
+
+    if observation is None:
+        raise ValueError("Pass the original observation to run_mcts().")
 
     # Add the batch dimension if needed
     if encoded_observation.ndim == 1:
@@ -156,7 +176,19 @@ def run_mcts(model, encoded_observation, legal_actions, current_player,
             root = Node()
             root.player = current_player
 
-            expand_node(root, hidden_state, None, policy, legal_actions)
+            # Reconstruct the actual public game state
+            root.public_state = initial_public_state(
+                observation,
+                game_config
+            )
+
+            expand_node(
+                root,
+                hidden_state,
+                None,
+                policy,
+                legal_actions
+            )
 
             # STEP 2: Run MCTS simulations
             for simulation in range(num_simulations):
@@ -194,21 +226,51 @@ def run_mcts(model, encoded_observation, legal_actions, current_player,
                             model.recurrent_inference(parent.hidden_state, action_tensor)
                         )
 
-                        node.player = 1 - parent.player
-
                         reward_list = rewards[0].tolist()
 
-                        # CALL ends the game
-                        if action == 6:
-                            node.terminal = True
-                            future_actions = []
-                            leaf_value = [0.0, 0.0]
+                        # Predict the next public state using the game rules
+                        node.public_state = advance_public_state(
+                            parent.public_state,
+                            action,
+                            game_config
+                        )
 
-                        else:
-                            future_actions = [2, 3, 4, 5]
+                        # Determine which player acts next
+                        node.player = node.public_state["player"]
+
+                        # Determine possible future legal actions
+                        # Determine future legal actions
+                        future_actions = future_legal_actions(
+                            node.public_state,
+                            game_config
+                        )
+
+                        # Check whether the game has ended
+                        node.terminal = (
+                                node.public_state["phase"] == "GAME_OVER"
+                        )
+
+                        # Expand using legal future actions
+                        if not node.terminal:
+
+                            expand_node(
+                                node,
+                                next_state,
+                                reward_list,
+                                policy,
+                                future_actions
+                            )
+
                             leaf_value = values[0].tolist()
 
-                        expand_node(node, next_state, reward_list, policy, future_actions)
+                        else:
+
+                            # Keep the predicted state and reward,
+                            # but do not create any future actions
+                            node.hidden_state = next_state
+                            node.reward = reward_list
+
+                            leaf_value = [0.0, 0.0]
 
                         break
 

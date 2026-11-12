@@ -25,8 +25,15 @@ def play_game(model, seed=10):
         legal_actions = env.legal_actions()
 
         # Use MCTS to select an action
-        action, root = run_mcts(model=model, encoded_observation=encoded_observation, legal_actions=legal_actions, current_player=player, num_simulations=16)
-
+        action, root = run_mcts(
+            model=model,
+            encoded_observation=encoded_observation,
+            legal_actions=legal_actions,
+            current_player=player,
+            num_simulations=16,
+            observation=observation,
+            game_config=env.config
+        )
         # Record the search results for training
         visit_counts = [0] * 7
 

@@ -6,7 +6,7 @@ from MuZero.encoder import encode_observation
 from MuZero.mcts import run_mcts
 
 
-def evaluate_model(model, num_games=20):
+def evaluate_model(model, num_games=2000, num_simulations=16):
 
     wins = 0
     losses = 0
@@ -40,7 +40,9 @@ def evaluate_model(model, num_games=20):
                     encoded_observation=encoded_obs,
                     legal_actions=legal_actions,
                     current_player=player,
-                    num_simulations=16
+                    num_simulations=num_simulations,
+                    observation=observation,
+                    game_config=env.config
                 )
 
             else:
@@ -72,3 +74,13 @@ def evaluate_model(model, num_games=20):
     print("Ties:", ties)
     print("Win rate:", wins / num_games)
     print("Average score:", total_score / num_games)
+
+    results = {
+        "wins": wins,
+        "losses": losses,
+        "ties": ties,
+        "win_rate": wins / num_games,
+        "average_score": total_score / num_games
+    }
+
+    return results
