@@ -56,3 +56,31 @@ def test_selfplay_train_and_agent_smoke():
     agent = MuZeroAgent(net, simulations=4)
     result = play_match(agent, _BotAgent(make_bot("random", 0)), games=4, seed=0)
     assert result.illegal_actions == 0 and result.truncated == 0
+
+
+def test_bot_games_and_curriculum():
+    from muzero.train import sample_opponents
+
+    net = MuZeroNet(SMALL).eval()
+    rng = np.random.default_rng(1)
+    opps = [make_bot("greedy", 0), None, make_bot("tell_reader", 1), make_bot("random", 2)]
+    games = play_games(net, 4, MCTSConfig(num_simulations=4), rng, seed0=10, opponents=opps)
+    for g, opp in zip(games, opps):
+        if opp is None:
+            assert g.opponent == "self" and g.searched.all()
+        else:
+            assert g.opponent == opp.name and g.net_seat in (0, 1)
+            assert (g.searched == (g.actor == g.net_seat)).all()
+            assert (g.policies[~g.searched] == 0).all()
+    buf = ReplayBuffer(100, td_steps=2, discount=1.0)
+    buf.add(games)
+    batch = buf.sample_batch(16, 3, rng)
+    cfg = TrainConfig(unroll=3)
+    losses = train_step(net.train(), torch.optim.Adam(net.parameters(), 1e-3), batch, cfg)
+    assert all(np.isfinite(v) for v in losses.values())
+
+    cfg = TrainConfig(iterations=100)
+    probs = [cfg.self_play_prob(i) for i in range(100)]
+    assert probs[0] == cfg.self_play_start and probs[-1] == cfg.self_play_end
+    assert all(a <= b for a, b in zip(probs, probs[1:]))
+    assert all(o is None for o in sample_opponents(TrainConfig(self_play_start=1.0), 0, 8, rng, 0))

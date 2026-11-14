@@ -33,6 +33,7 @@ class ModelConfig:
     hidden_dim: int = 256
     n_res_blocks: int = 2
     head_dim: int = 64
+    support_size: int = 10  # categorical value/reward support is [-support_size, support_size]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,6 +48,39 @@ def min_max_normalize(x: torch.Tensor) -> torch.Tensor:
     lo = x.min(dim=-1, keepdim=True).values
     hi = x.max(dim=-1, keepdim=True).values
     return (x - lo) / (hi - lo).clamp_min(1e-5)
+
+
+TRANSFORM_EPS = 1e-3
+
+
+def scalar_transform(x: torch.Tensor) -> torch.Tensor:
+    """``h(x)``: the invertible value-compressing transform from the MuZero paper."""
+    return torch.sign(x) * (torch.sqrt(x.abs() + 1.0) - 1.0) + TRANSFORM_EPS * x
+
+
+def inverse_scalar_transform(y: torch.Tensor) -> torch.Tensor:
+    """``h^-1(y)``."""
+    eps = TRANSFORM_EPS
+    return torch.sign(y) * (((torch.sqrt(1.0 + 4.0 * eps * (y.abs() + 1.0 + eps)) - 1.0) / (2.0 * eps)) ** 2 - 1.0)
+
+
+def scalar_to_support(x: torch.Tensor, support_size: int) -> torch.Tensor:
+    """Two-hot target ``[..., 2 * support_size + 1]`` for scalars ``x`` (``h`` is applied first)."""
+    y = scalar_transform(x).clamp(-support_size, support_size)
+    lo = y.floor()
+    p_hi = y - lo
+    lo_idx = (lo + support_size).long()
+    hi_idx = (lo_idx + 1).clamp_max(2 * support_size)
+    target = torch.zeros(*x.shape, 2 * support_size + 1, dtype=x.dtype, device=x.device)
+    target.scatter_add_(-1, lo_idx.unsqueeze(-1), (1.0 - p_hi).unsqueeze(-1))
+    target.scatter_add_(-1, hi_idx.unsqueeze(-1), p_hi.unsqueeze(-1))
+    return target
+
+
+def support_to_scalar(logits: torch.Tensor, support_size: int) -> torch.Tensor:
+    """Expected scalar of categorical ``logits [..., 2 * support_size + 1]`` (``h^-1`` of the mean)."""
+    support = torch.arange(-support_size, support_size + 1, dtype=logits.dtype, device=logits.device)
+    return inverse_scalar_transform((torch.softmax(logits, dim=-1) * support).sum(-1))
 
 
 class ResidualBlock(nn.Module):
@@ -92,12 +126,14 @@ class Dynamics(nn.Module):
         self.inp = nn.Sequential(nn.Linear(cfg.latent_dim + ACTION_SPACE_SIZE, cfg.hidden_dim), nn.LayerNorm(cfg.hidden_dim), nn.ReLU())
         self.blocks = nn.Sequential(*[ResidualBlock(cfg.hidden_dim) for _ in range(cfg.n_res_blocks)])
         self.next_state = nn.Linear(cfg.hidden_dim, cfg.latent_dim)
-        self.reward = nn.Sequential(nn.Linear(cfg.hidden_dim, cfg.head_dim), nn.ReLU(), nn.Linear(cfg.head_dim, 2))
+        self.bins = 2 * cfg.support_size + 1
+        self.reward = nn.Sequential(nn.Linear(cfg.hidden_dim, cfg.head_dim), nn.ReLU(), nn.Linear(cfg.head_dim, 2 * self.bins))
 
     def forward(self, state: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ``(next_state, reward_logits [B, 2, bins])``."""
         onehot = torch.nn.functional.one_hot(action, ACTION_SPACE_SIZE).to(state.dtype)
         h = self.blocks(self.inp(torch.cat([state, onehot], dim=-1)))
-        return min_max_normalize(self.next_state(h)), self.reward(h)
+        return min_max_normalize(self.next_state(h)), self.reward(h).view(-1, 2, self.bins)
 
 
 class Prediction(nn.Module):
@@ -106,11 +142,13 @@ class Prediction(nn.Module):
         self.trunk = nn.Sequential(nn.Linear(cfg.latent_dim, cfg.hidden_dim), nn.LayerNorm(cfg.hidden_dim), nn.ReLU())
         self.blocks = nn.Sequential(*[ResidualBlock(cfg.hidden_dim) for _ in range(cfg.n_res_blocks)])
         self.policy = nn.Sequential(nn.Linear(cfg.hidden_dim, cfg.head_dim), nn.ReLU(), nn.Linear(cfg.head_dim, ACTION_SPACE_SIZE))
-        self.value = nn.Sequential(nn.Linear(cfg.hidden_dim, cfg.head_dim), nn.ReLU(), nn.Linear(cfg.head_dim, 2))
+        self.bins = 2 * cfg.support_size + 1
+        self.value = nn.Sequential(nn.Linear(cfg.hidden_dim, cfg.head_dim), nn.ReLU(), nn.Linear(cfg.head_dim, 2 * self.bins))
 
     def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ``(policy_logits [B, A], value_logits [B, 2, bins])``."""
         h = self.blocks(self.trunk(state))
-        return self.policy(h), self.value(h)
+        return self.policy(h), self.value(h).view(-1, 2, self.bins)
 
 
 class MuZeroNet(nn.Module):
@@ -121,14 +159,19 @@ class MuZeroNet(nn.Module):
         self.dynamics = Dynamics(self.cfg)
         self.prediction = Prediction(self.cfg)
 
-    def initial_inference(self, feats, pad):
-        """Observation -> ``(state, policy_logits, value)``."""
+    def to_scalar(self, logits: torch.Tensor) -> torch.Tensor:
+        return support_to_scalar(logits, self.cfg.support_size)
+
+    def initial_inference(self, feats, pad, raw: bool = False):
+        """Observation -> ``(state, policy_logits, value)``; ``value`` is ``[B, 2]`` (logits if ``raw``)."""
         state = self.representation(feats, pad)
         logits, value = self.prediction(state)
-        return state, logits, value
+        return state, logits, (value if raw else self.to_scalar(value))
 
-    def recurrent_inference(self, state, action):
-        """``(state, action)`` -> ``(next_state, reward, policy_logits, value)``."""
+    def recurrent_inference(self, state, action, raw: bool = False):
+        """``(state, action)`` -> ``(next_state, reward, policy_logits, value)``; scalars unless ``raw``."""
         next_state, reward = self.dynamics(state, action)
         logits, value = self.prediction(next_state)
-        return next_state, reward, logits, value
+        if raw:
+            return next_state, reward, logits, value
+        return next_state, self.to_scalar(reward), logits, self.to_scalar(value)
