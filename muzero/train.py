@@ -57,6 +57,7 @@ class TrainConfig:
     bot_weights: tuple[float, ...] = (1.0, 1.0, 1.0)
     ckpt_every: int = 50
     seed: int = 0
+    device: str = "auto"          # "auto" = cuda if available, else cpu
     model: ModelConfig = field(default_factory=ModelConfig)
 
     def simulations(self, iteration: int) -> int:
@@ -87,8 +88,15 @@ def sample_opponents(cfg: TrainConfig, iteration: int, num_games: int, rng: np.r
     return opponents
 
 
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        name = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(name)
+
+
 def save_checkpoint(net: MuZeroNet, path: Path, iteration: int) -> None:
-    torch.save({"model_config": net.cfg.to_dict(), "state_dict": net.state_dict(), "iteration": iteration}, path)
+    state_dict = {k: v.cpu() for k, v in net.state_dict().items()}
+    torch.save({"model_config": net.cfg.to_dict(), "state_dict": state_dict, "iteration": iteration}, path)
 
 
 def load_checkpoint(path: str | Path) -> MuZeroNet:
@@ -99,7 +107,8 @@ def load_checkpoint(path: str | Path) -> MuZeroNet:
 
 
 def train_step(net: MuZeroNet, opt: torch.optim.Optimizer, batch: dict, cfg: TrainConfig) -> dict[str, float]:
-    t = {k: torch.from_numpy(v) for k, v in batch.items()}
+    device = next(net.parameters()).device
+    t = {k: torch.from_numpy(v).to(device, non_blocking=True) for k, v in batch.items()}
     K = cfg.unroll
     S = net.cfg.support_size
     state, logits, value = net.initial_inference(t["feats"], t["pad"], raw=True)
@@ -133,7 +142,9 @@ def train(cfg: TrainConfig, out: Path, log=print) -> MuZeroNet:
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
-    net = MuZeroNet(cfg.model)
+    device = resolve_device(cfg.device)
+    log(f"device: {device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
+    net = MuZeroNet(cfg.model).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     buffer = ReplayBuffer(cfg.buffer_games, cfg.td_steps, cfg.discount)
     history: list[dict] = []
@@ -210,6 +221,7 @@ def main() -> None:
     p.add_argument("--self-play-ramp", type=float, nargs=2, default=d.self_play_ramp, metavar=("START", "END"),
                    help="fractions of training over which the self-play probability ramps up")
     p.add_argument("--bots", nargs="+", default=list(d.bot_pool), help="bot pool for non-self-play games")
+    p.add_argument("--device", default=d.device, help='"auto" (cuda if available), "cuda", "cuda:1" or "cpu"')
     p.add_argument("--threads", type=int, default=0, help="torch CPU threads (0 = torch default)")
     args = p.parse_args()
     if args.threads:
@@ -217,7 +229,7 @@ def main() -> None:
     cfg = TrainConfig(
         iterations=args.iterations, games_per_iter=args.games_per_iter, grad_steps=args.grad_steps,
         batch_size=args.batch_size, unroll=args.unroll, buffer_games=args.buffer_games, lr=args.lr,
-        ckpt_every=args.ckpt_every, seed=args.seed,
+        ckpt_every=args.ckpt_every, seed=args.seed, device=args.device,
         self_play_start=args.self_play_start, self_play_end=args.self_play_end,
         self_play_ramp=tuple(args.self_play_ramp), bot_pool=tuple(args.bots), bot_weights=(1.0,) * len(args.bots),
     )

@@ -37,9 +37,12 @@ class MuZeroAgent:
     def latent(self, observations: list[dict]) -> np.ndarray:
         """The representation output h(o), shape ``[N, latent_dim]``."""
         feats, pad = encode_batch(observations)
-        return self.net.representation(torch.from_numpy(feats), torch.from_numpy(pad)).numpy()
+        device = next(self.net.parameters()).device
+        return self.net.representation(torch.from_numpy(feats).to(device), torch.from_numpy(pad).to(device)).cpu().numpy()
 
 
-def load_muzero(path: str | None = None, simulations: int = 16) -> MuZeroAgent:
+def load_muzero(path: str | None = None, simulations: int = 16, device: str | None = None) -> MuZeroAgent:
+    """``device`` defaults to ``$MUZERO_DEVICE``, else CPU."""
     path = path or os.environ.get("MUZERO_CKPT", "runs/muzero/model.pt")
-    return MuZeroAgent(load_checkpoint(path), simulations=simulations)
+    device = device or os.environ.get("MUZERO_DEVICE", "cpu")
+    return MuZeroAgent(load_checkpoint(path).to(device), simulations=simulations)

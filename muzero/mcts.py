@@ -111,8 +111,9 @@ def run_mcts(
     ``[player to move, other player]``.
     """
     B = len(legal)
-    state, logits, value = net.initial_inference(torch.from_numpy(feats), torch.from_numpy(pad))
-    logits, value = logits.numpy(), value.numpy()
+    device = next(net.parameters()).device
+    state, logits, value = net.initial_inference(torch.from_numpy(feats).to(device), torch.from_numpy(pad).to(device))
+    logits, value = logits.cpu().numpy(), value.cpu().numpy()
 
     roots, minmax = [], []
     for b in range(B):
@@ -149,8 +150,8 @@ def run_mcts(
             paths.append(path)
 
         states = torch.stack([p.state for p in parents])
-        next_state, reward, logits, value = net.recurrent_inference(states, torch.tensor(actions))
-        reward, logits, value = reward.numpy(), logits.numpy(), value.numpy()
+        next_state, reward, logits, value = net.recurrent_inference(states, torch.tensor(actions, device=device))
+        reward, logits, value = reward.cpu().numpy(), logits.cpu().numpy(), value.cpu().numpy()
         policy = np.exp(logits - logits.max(axis=1, keepdims=True))
         policy /= policy.sum(axis=1, keepdims=True)
 
