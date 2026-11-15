@@ -1,7 +1,12 @@
 import random
 import torch
 import torch.nn.functional as F
-
+from MuZero.networks import (
+    VALUE_MIN,
+    VALUE_MAX,
+    VALUE_SUPPORT_SIZE,
+    transform_value
+)
 
 def rewards_as_list(rewards):
     """Convert Hidden Hand's reward dictionary to [player 0, player 1]."""
@@ -44,7 +49,9 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
 
     observation = game[start]["observation"].to(device).unsqueeze(0)
 
-    hidden_state, policy, value = model.initial_inference(observation)
+    hidden_state, policy, value, value_logits = (
+        model.initial_inference_with_logits(observation)
+    )
 
     all_losses = []
     policy_losses = []
@@ -61,8 +68,10 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
     )
 
     policy_loss = -(target_policy * F.log_softmax(policy, dim=1)).sum()
-    value_loss = F.mse_loss(value, target_value)
-
+    value_loss = categorical_value_loss(
+        value_logits,
+        target_value
+    )
     policy_losses.append(policy_loss)
     value_losses.append(value_loss)
 
@@ -81,9 +90,11 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
             device=device
         )
 
-        hidden_state, predicted_reward, policy, value = model.recurrent_inference(
-            hidden_state,
-            action
+        hidden_state, predicted_reward, policy, value, value_logits = (
+            model.recurrent_inference_with_logits(
+                hidden_state,
+                action
+            )
         )
 
         # Compare the predicted immediate reward with the real reward
@@ -116,10 +127,9 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
             )
 
             policy_loss = -(target_policy * F.log_softmax(policy, dim=1)).sum()
-            value_loss = F.smooth_l1_loss(
-                value,
-                target_value,
-                beta=5.0
+            value_loss = categorical_value_loss(
+                value_logits,
+                target_value
             )
 
             policy_losses.append(policy_loss)
@@ -129,7 +139,10 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
 
         else:
             # No future reward after the final action
-            value_loss = F.mse_loss(value, torch.zeros_like(value))
+            value_loss = categorical_value_loss(
+                value_logits,
+                torch.zeros_like(value)
+            )
 
             value_losses.append(value_loss)
             all_losses.append(value_loss)
@@ -275,3 +288,73 @@ def validate_model(
         name: total / samples
         for name, total in totals.items()
     }
+
+def categorical_value_loss(value_logits, target_returns):
+    """
+    Calculate categorical cross-entropy using
+    compressed future returns.
+
+    value_logits:
+        [batch_size, num_players, 29]
+
+    target_returns:
+        [batch_size, num_players]
+    """
+
+    # STEP 1: Compress the original return values
+    compressed_returns = transform_value(
+        target_returns
+    )
+
+    # STEP 2: Make sure values fit within our support
+    if torch.any(
+        (compressed_returns < VALUE_MIN)
+        | (compressed_returns > VALUE_MAX)
+    ):
+        raise ValueError(
+            "Compressed return is outside "
+            "the supported range [-14, 14]"
+        )
+
+    # STEP 3: Convert compressed values into bin positions
+    positions = compressed_returns - VALUE_MIN
+
+    # STEP 4: Find the two nearest categories
+    lower = positions.floor().long()
+    upper = positions.ceil().long()
+
+    # STEP 5: Calculate probability weights
+    upper_weight = positions - lower
+    lower_weight = 1.0 - upper_weight
+
+    # STEP 6: Create the target distribution
+    target_distribution = torch.zeros_like(
+        value_logits
+    )
+
+    # STEP 7: Assign probability to the lower category
+    target_distribution.scatter_add_(
+        dim=-1,
+        index=lower.unsqueeze(-1),
+        src=lower_weight.unsqueeze(-1)
+    )
+
+    # STEP 8: Assign probability to the upper category
+    target_distribution.scatter_add_(
+        dim=-1,
+        index=upper.unsqueeze(-1),
+        src=upper_weight.unsqueeze(-1)
+    )
+
+    # STEP 9: Convert predicted logits into log probabilities
+    log_probabilities = F.log_softmax(
+        value_logits,
+        dim=-1
+    )
+
+    # STEP 10: Calculate categorical cross-entropy
+    loss = -(
+        target_distribution * log_probabilities
+    ).sum(dim=-1).mean()
+
+    return loss

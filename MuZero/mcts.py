@@ -41,32 +41,91 @@ class Node:
         return self.value_sum[player] / self.visit_count
 
 def select_child(node, player, c_puct=1.5, discount=1.0):
+    """
+    Select an MCTS child using normalized action values.
+
+    Normalizing the exploitation term helps balance
+    predicted values against the exploration bonus.
+    """
 
     best_score = float("-inf")
     best_action = None
     best_child = None
 
-    # Check every possible action from this node
-    for action in node.children:
+    # STEP 1: Collect estimated values for visited children
+    known_values = []
 
-        child = node.children[action]
+    for child in node.children.values():
 
-        value = discount * child.value(player)
+        if child.visit_count > 0:
 
-        if child.reward is not None:
-            value = child.reward[player] + value
+            estimated_value = (
+                discount * child.value(player)
+            )
 
-        # Calculate how much we should explore this action
-        parent_visits = math.sqrt(node.visit_count + 1)
+            if child.reward is not None:
+
+                estimated_value += child.reward[player]
+
+            known_values.append(estimated_value)
+
+    # STEP 2: Find the minimum and maximum values
+    if len(known_values) > 0:
+
+        minimum_value = min(known_values)
+        maximum_value = max(known_values)
+
+    else:
+
+        minimum_value = 0.0
+        maximum_value = 0.0
+
+    value_range = maximum_value - minimum_value
+
+    # STEP 3: Evaluate each possible action
+    for action, child in node.children.items():
+
+        # Calculate normalized exploitation value
+        if child.visit_count == 0 or value_range < 1e-5:
+
+            # Neutral value for unvisited children
+            value = 0.5
+
+        else:
+
+            raw_value = (
+                discount * child.value(player)
+            )
+
+            if child.reward is not None:
+
+                raw_value += child.reward[player]
+
+            value = (
+                (raw_value - minimum_value)
+                / value_range
+            )
+
+        # STEP 4: Calculate exploration bonus
+        parent_visits = math.sqrt(
+            node.visit_count + 1
+        )
+
         child_visits = child.visit_count + 1
 
-        exploration = c_puct * child.prior * parent_visits / child_visits
+        exploration = (
+            c_puct
+            * child.prior
+            * parent_visits
+            / child_visits
+        )
 
-        # Calculate the total score
+        # STEP 5: Combine exploitation and exploration
         score = value + exploration
 
-        # Keep track of the action with the highest score
+        # STEP 6: Track the best action
         if score > best_score:
+
             best_score = score
             best_action = action
             best_child = child
