@@ -40,7 +40,7 @@ class Node:
 
         return self.value_sum[player] / self.visit_count
 
-def select_child(node, player, c_puct=1.5, discount=1.0):
+def select_child(node, player, c_puct=3.0, discount=1.0):
     """
     Select an MCTS child using normalized action values.
 
@@ -132,32 +132,74 @@ def select_child(node, player, c_puct=1.5, discount=1.0):
 
     return best_action, best_child
 
-def expand_node(node, hidden_state, reward, policy_logits, legal_actions):
+def expand_node(
+    node,
+    hidden_state,
+    reward,
+    policy_logits,
+    legal_actions,
+    add_noise=False,
+    dirichlet_alpha=0.3,
+    exploration_fraction=0.25
+):
+    """
+    Expand an MCTS node using policy priors.
 
-    # Store the information for this node
+    Dirichlet noise is optionally applied to encourage
+    exploration at the root during self-play training.
+    """
+
+    # Store the node's hidden state and predicted reward
     node.hidden_state = hidden_state
     node.reward = reward
 
-    # Convert action scores into probabilities
-    probabilities = torch.softmax(policy_logits, dim=-1)
+    # Convert policy logits into probabilities
+    probabilities = torch.softmax(
+        policy_logits,
+        dim=-1
+    )
 
-    # Remove the batch dimension
+    # Remove batch dimension
     probabilities = probabilities.squeeze(0)
 
-    # Only keep probabilities for legal actions
+    # Extract probabilities for legal actions
     legal_probabilities = probabilities[legal_actions]
 
-    # Make legal probabilities add up to 1
-    legal_probabilities = legal_probabilities / legal_probabilities.sum()
+    # Normalize legal probabilities
+    legal_probabilities = (
+        legal_probabilities
+        / legal_probabilities.sum()
+    )
 
-    # Create a child node for each legal action
-    for i in range(len(legal_actions)):
+    # Apply Dirichlet noise when requested
+    if add_noise:
 
-        action = legal_actions[i]
-        probability = legal_probabilities[i].item()
+        concentration = torch.full_like(
+            legal_probabilities,
+            dirichlet_alpha
+        )
 
-        node.children[action] = Node(prior=probability)
+        noise_distribution = torch.distributions.Dirichlet(
+            concentration
+        )
 
+        noise = noise_distribution.sample()
+
+        legal_probabilities = (
+            (1.0 - exploration_fraction)
+            * legal_probabilities
+            + exploration_fraction
+            * noise
+        )
+
+    # Create children for legal actions
+    for index, action in enumerate(legal_actions):
+
+        prior = legal_probabilities[index].item()
+
+        node.children[action] = Node(
+            prior=prior
+        )
 def backpropagate(search_path, value, discount=1.0):
     """
     Update the visited nodes after an MCTS simulation.
@@ -194,7 +236,10 @@ def run_mcts(
     max_depth=4,
     discount=1.0,
     observation=None,
-    game_config=None
+    game_config=None,
+    add_root_noise=False,
+    dirichlet_alpha=0.3,
+    exploration_fraction=0.25
 ):
     """Search from one real observation; return the selected action and tree.
 
@@ -246,7 +291,10 @@ def run_mcts(
                 hidden_state,
                 None,
                 policy,
-                legal_actions
+                legal_actions,
+                add_noise=add_root_noise,
+                dirichlet_alpha=dirichlet_alpha,
+                exploration_fraction=exploration_fraction
             )
 
             # STEP 2: Run MCTS simulations

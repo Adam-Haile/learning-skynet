@@ -30,10 +30,28 @@ def future_returns(game, start, discount=1.0):
 
 
 def policy_target(turn, device):
-    """Turn MCTS visit counts into a probability distribution."""
-    counts = torch.tensor(turn["visit_counts"], dtype=torch.float32, device=device)
+    """
+    Convert MCTS visit counts into a probability distribution.
+
+    Returns None for bot-controlled turns because
+    those turns do not have MCTS policy targets.
+    """
+
+    if not turn.get("policy_valid", True):
+        return None
+
+    counts = torch.tensor(
+        turn["visit_counts"],
+        dtype=torch.float32,
+        device=device
+    )
+
     if counts.sum().item() == 0:
-        raise ValueError("MCTS visit counts must add up to more than zero")
+
+        raise ValueError(
+            "MCTS visit counts must add up to more than zero"
+        )
+
     return counts / counts.sum()
 
 def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
@@ -53,29 +71,43 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
         model.initial_inference_with_logits(observation)
     )
 
-    all_losses = []
     policy_losses = []
     value_losses = []
     reward_losses = []
 
     # Calculate loss for the starting observation
-    target_policy = policy_target(game[start], device).unsqueeze(0)
+    # Calculate the initial policy target
+    target_policy = policy_target(
+        game[start],
+        device
+    )
 
+    # Only calculate policy loss for MuZero-controlled turns
+    if target_policy is not None:
+        target_policy = target_policy.unsqueeze(0)
+
+        policy_loss = -(
+                target_policy * F.log_softmax(
+            policy,
+            dim=1
+        )
+        ).sum()
+
+        policy_losses.append(policy_loss)
+
+    # Calculate value loss regardless of who controlled the turn
     target_value = torch.tensor(
         [future_returns(game, start, discount)],
         dtype=torch.float32,
         device=device
     )
 
-    policy_loss = -(target_policy * F.log_softmax(policy, dim=1)).sum()
     value_loss = categorical_value_loss(
         value_logits,
         target_value
     )
-    policy_losses.append(policy_loss)
-    value_losses.append(value_loss)
 
-    all_losses.extend([policy_loss, value_loss])
+    value_losses.append(value_loss)
 
     # Predict what happens after each recorded action
     end = min(start + unroll_steps, len(game))
@@ -111,14 +143,16 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
         )
 
         reward_losses.append(reward_loss)
-        all_losses.append(reward_loss)
 
         # Compare predictions with the next turn
         next_index = index + 1
 
         if next_index < len(game):
 
-            target_policy = policy_target(game[next_index], device).unsqueeze(0)
+            target_policy = policy_target(
+                game[next_index],
+                device
+            )
 
             target_value = torch.tensor(
                 [future_returns(game, next_index, discount)],
@@ -126,16 +160,24 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
                 device=device
             )
 
-            policy_loss = -(target_policy * F.log_softmax(policy, dim=1)).sum()
             value_loss = categorical_value_loss(
                 value_logits,
                 target_value
             )
 
-            policy_losses.append(policy_loss)
-            value_losses.append(value_loss)
+            if target_policy is not None:
+                target_policy = target_policy.unsqueeze(0)
 
-            all_losses.extend([policy_loss, value_loss])
+                policy_loss = -(
+                        target_policy * F.log_softmax(
+                    policy,
+                    dim=1
+                )
+                ).sum()
+
+                policy_losses.append(policy_loss)
+
+            value_losses.append(value_loss)
 
         else:
             # No future reward after the final action
@@ -145,14 +187,30 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
             )
 
             value_losses.append(value_loss)
-            all_losses.append(value_loss)
 
             break
 
-    # Average each loss independently
-    policy_loss = torch.stack(policy_losses).mean()
-    value_loss = torch.stack(value_losses).mean()
-    reward_loss = torch.stack(reward_losses).mean()
+    # Average policy losses
+    if len(policy_losses) > 0:
+
+        policy_loss = torch.stack(
+            policy_losses
+        ).mean()
+
+    else:
+
+        # No MCTS policy targets in this sample
+        policy_loss = value_logits.sum() * 0.0
+
+    # Average value losses
+    value_loss = torch.stack(
+        value_losses
+    ).mean()
+
+    # Average reward losses
+    reward_loss = torch.stack(
+        reward_losses
+    ).mean()
 
     # Explicitly balance the three objectives
     policy_weight = 1.0
