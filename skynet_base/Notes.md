@@ -53,3 +53,26 @@ Card games are a known weak spot for Muzero: hidden cards and random draws break
 
 ## Temperature
 Controls the exploration the model does during training.  Makes the model more random at first, and then more greedy as training moves on. 
+# SkyNet Additions
+
+## Ego Conditioning
+After the Representation model produces the latent state, three learned embeddings are appended to it before it goes into the Prediction model (`EgoConditioning` in `model.py`):
+* **e_ego**: the player whose value (closeness to winning) we are estimating. It is stored as a seat offset from the root observer (the player whose observation built the latent).
+* **e_current**: whose turn it is, relative to the ego (0 = it is the ego's turn).
+* **e_n**: the number of players in the game.
+
+The Dynamics model never sees these embeddings. A transition doesn't depend on whose value we are asking about, so a single latent trajectory and a single MCTS tree serve every ego. The conditioning is re-applied at every unroll step and tree node, so e_current stays correct as turns alternate.
+
+The value head now outputs one value, for the ego only. `predict_all_egos` runs Prediction once per player in mover-relative order and stacks the results. For 2 players this gives back the same `[mover, other]` value vector that MCTS and the replay targets already use. The policy is taken from the ego == mover row.
+
+## Auxiliary Heads
+Prediction has two extra heads, each trained with cross-entropy against the realized end of the game:
+* **Winner head**: predicts which seat wins, relative to the ego (class 0 = the ego wins), plus a draw class.
+* **Rank head**: predicts the ego's final rank (0 = best). Lowest score wins, and tied players share the best rank.
+
+Loss = MuZero loss (policy + value + reward) + alpha * L_winner + beta * L_rank
+
+Both heads are trained for every ego at every unroll step that is still inside the game, bot moves included. alpha ramps linearly from 0.1 to 0.5 and beta from 0.05 to 0.25 between iterations 200 and 500 (`TrainConfig.aux_weights`).
+
+## Hyperparameters (from the SkyNet paper)
+2000 iterations, 32 episodes and 96 train steps per iteration, batch 64, unroll 8, 10 TD steps, gamma = 0.997, AdamW with lr 3e-4. Transformer: 6 layers, 8 heads, d_model 256, FF dim 1024, latent 512. MCTS uses 200 -> 400 -> 600 simulations during training. Evaluation uses 200 simulations with Dirichlet noise (alpha 0.3, fraction 0.25).

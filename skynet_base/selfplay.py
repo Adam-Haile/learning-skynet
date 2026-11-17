@@ -1,0 +1,243 @@
+"""Self-play (and network-vs-bot) data generation and the replay buffer."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from hidden_hand.env import ACTION_SPACE_SIZE, NUM_PLAYERS, HiddenHandConfig, HiddenHandEnv
+
+from .encoding import FEATURE_DIM, NUM_TOKENS, encode_observation
+from .mcts import MCTSConfig, run_mcts, select_actions
+
+
+def final_ranks(scores) -> tuple[int, ...]:
+    """Rank of each seat (0 = best). Lower scores win; tied seats share the best rank."""
+    return tuple(int(sum(other < mine for other in scores)) for mine in scores)
+
+
+@dataclass
+class Game:
+    """One finished game. Row ``t`` is the decision at step ``t`` (``T`` decisions in all)."""
+
+    feats: np.ndarray       # [T, NUM_TOKENS, FEATURE_DIM] float16
+    pad: np.ndarray         # [T, NUM_TOKENS] bool
+    actions: np.ndarray     # [T] int64
+    policies: np.ndarray    # [T, A] float32, normalised MCTS visit counts
+    actor: np.ndarray       # [T] int64, player who moved at step t
+    root_values: np.ndarray  # [T, 2] float32, [mover, other] from the search at step t
+    rewards: np.ndarray     # [T, 2] float32, reward after action t as [player 0, player 1], scaled
+    final_scores: tuple[int, int] = (0, 0)
+    winner: int = -1
+    # [T] bool, True where the network searched (False for bot moves: no policy target, no root value)
+    searched: np.ndarray = field(default=None)
+    opponent: str = "self"  # "self" for self-play, otherwise the bot's name
+    net_seat: int = -1      # the network's seat in a bot game (-1 for self-play)
+
+    final_ranks: tuple[int, ...] = None  # per seat, 0 = best (derived from final_scores if None)
+
+    def __post_init__(self) -> None:
+        if self.searched is None:
+            self.searched = np.ones(len(self.actions), dtype=bool)
+        if self.final_ranks is None:
+            self.final_ranks = final_ranks(self.final_scores)
+
+    def __len__(self) -> int:
+        return len(self.actions)
+
+    def value_targets(self, td_steps: int, discount: float) -> np.ndarray:
+        """n-step return targets as ``[mover, other]`` for every step (bootstrapping from root values).
+
+        Bootstrapping only uses a root value the network searched; past a bot move (no search) the
+        target falls back to the Monte-Carlo return to the end of the game.
+        """
+        T = len(self)
+        # root values in absolute player order
+        absolute = np.where(self.actor[:, None] == 0, self.root_values, self.root_values[:, ::-1])
+        targets = np.zeros((T, 2), dtype=np.float32)
+        for t in range(T):
+            end = min(t + td_steps, T)
+            powers = discount ** np.arange(end - t)
+            ret = (powers[:, None] * self.rewards[t:end]).sum(axis=0)
+            if t + td_steps < T and self.searched[t + td_steps]:
+                ret = ret + discount**td_steps * absolute[t + td_steps]
+            elif t + td_steps < T:
+                rest = discount ** np.arange(T - end)
+                ret = ret + discount**td_steps * (rest[:, None] * self.rewards[end:]).sum(axis=0)
+            mover = self.actor[t]
+            targets[t] = (ret[mover], ret[1 - mover])
+        return targets
+
+
+def play_games(
+    net,
+    num_games: int,
+    mcts_cfg: MCTSConfig,
+    rng: np.random.Generator,
+    seed0: int,
+    env_config: HiddenHandConfig | None = None,
+    reward_scale: float = 10.0,
+    temperature: float | callable = 1.0,
+    add_noise: bool = True,
+    opponents: list | None = None,
+) -> list[Game]:
+    """Play ``num_games`` games in lockstep, one batched search per move.
+
+    ``temperature`` may be a function of the game step (``step -> temperature``).
+    ``opponents[i]`` is ``None`` for a self-play game, or a bot (``select_action(obs, legal)``) that
+    takes a random seat against the network. Bot moves are recorded so the dynamics still see every
+    transition, but they carry no policy target (``searched`` is False).
+    """
+    opponents = list(opponents) if opponents is not None else [None] * num_games
+    assert len(opponents) == num_games
+    net_seat = [int(rng.integers(2)) if opp is not None else -1 for opp in opponents]
+    envs = [HiddenHandEnv(seed=seed0 + i, config=env_config) for i in range(num_games)]
+    obs = [env.observe(env.current_player) for env in envs]
+    rec = [dict(feats=[], pad=[], actions=[], policies=[], actor=[], values=[], rewards=[], searched=[]) for _ in envs]
+    done = [False] * num_games
+    temp_fn = temperature if callable(temperature) else (lambda _step: temperature)
+    no_policy = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
+    no_value = np.zeros(2, dtype=np.float32)
+
+    def record(i: int, f: np.ndarray, pd: np.ndarray, action: int, policy, value, searched: bool) -> None:
+        env, r = envs[i], rec[i]
+        r["feats"].append(f.astype(np.float16))
+        r["pad"].append(pd)
+        r["actions"].append(action)
+        r["policies"].append(policy)
+        r["actor"].append(env.current_player)
+        r["values"].append(value)
+        r["searched"].append(searched)
+        obs[i], rewards, terminated, _info = env.step(action)
+        r["rewards"].append([rewards["player_0"] / reward_scale, rewards["player_1"] / reward_scale])
+        done[i] = terminated
+
+    while not all(done):
+        active = [i for i in range(num_games) if not done[i]]
+        bot_turn = [i for i in active if opponents[i] is not None and envs[i].current_player != net_seat[i]]
+        net_turn = [i for i in active if not (opponents[i] is not None and envs[i].current_player != net_seat[i])]
+
+        for i in bot_turn:
+            f, pd = encode_observation(obs[i])
+            action = int(opponents[i].select_action(obs[i], envs[i].legal_actions()))
+            record(i, f, pd, action, no_policy, no_value, False)
+
+        if not net_turn:
+            continue
+        enc = [encode_observation(obs[i]) for i in net_turn]
+        feats = np.stack([e[0] for e in enc])
+        pad = np.stack([e[1] for e in enc])
+        legal = [envs[i].legal_actions() for i in net_turn]
+        visits, values = run_mcts(net, feats, pad, legal, mcts_cfg, rng, add_noise)
+        for k, i in enumerate(net_turn):
+            action = int(select_actions(visits[k:k + 1], temp_fn(envs[i].state.step), rng)[0])
+            record(i, feats[k], pad[k], action, visits[k] / visits[k].sum(), values[k], True)
+
+    games = []
+    for env, r, opp, seat in zip(envs, rec, opponents, net_seat):
+        games.append(
+            Game(
+                feats=np.stack(r["feats"]),
+                pad=np.stack(r["pad"]),
+                actions=np.array(r["actions"], dtype=np.int64),
+                policies=np.stack(r["policies"]).astype(np.float32),
+                actor=np.array(r["actor"], dtype=np.int64),
+                root_values=np.stack(r["values"]).astype(np.float32),
+                rewards=np.array(r["rewards"], dtype=np.float32),
+                final_scores=tuple(env.scores),
+                winner=env.winner,
+                searched=np.array(r["searched"], dtype=bool),
+                opponent="self" if opp is None else getattr(opp, "name", "bot"),
+                net_seat=seat,
+            )
+        )
+    return games
+
+
+class ReplayBuffer:
+    """FIFO buffer of whole games; samples ``(game, start)`` positions uniformly over decisions."""
+
+    def __init__(self, capacity_games: int, td_steps: int, discount: float) -> None:
+        self.capacity = capacity_games
+        self.td_steps = td_steps
+        self.discount = discount
+        self.games: list[Game] = []
+        self.value_targets: list[np.ndarray] = []
+
+    def add(self, games: list[Game]) -> None:
+        for g in games:
+            self.games.append(g)
+            self.value_targets.append(g.value_targets(self.td_steps, self.discount))
+        excess = len(self.games) - self.capacity
+        if excess > 0:
+            del self.games[:excess], self.value_targets[:excess]
+
+    def __len__(self) -> int:
+        return len(self.games)
+
+    def sample_batch(
+        self, batch_size: int, unroll: int, rng: np.random.Generator, max_players: int = NUM_PLAYERS
+    ) -> dict[str, np.ndarray]:
+        """Build a batch of ``unroll``-step training targets.
+
+        Targets for step ``k`` describe the state after ``k`` actions. Past the end of the game the
+        state is absorbing: value and reward are 0, the policy is not trained (``policy_mask`` 0).
+
+        Ego-conditioning / auxiliary-head targets, all in mover-relative ego order (ego ``j`` at step
+        ``k`` is the seat ``j`` places after the player to move, matching ``value``):
+
+        * ``cur_off [B, K+1]``: seat to move at step ``k`` as an offset from the root observer;
+        * ``winner [B, K+1, n]``: winner class for each ego, ``(winner - ego) mod n`` or
+          ``max_players`` on a draw;
+        * ``rank [B, K+1, n]``: each ego's final rank (0 = best);
+        * ``in_game [B, K+1]``: 1 while ``t < T`` (unlike ``policy_mask`` this includes bot moves).
+        """
+        lengths = np.array([len(g) for g in self.games])
+        gi = rng.choice(len(self.games), size=batch_size, p=lengths / lengths.sum())
+        start = np.array([rng.integers(lengths[g]) for g in gi])
+
+        K = unroll
+        n = NUM_PLAYERS
+        batch = dict(
+            feats=np.zeros((batch_size, NUM_TOKENS, FEATURE_DIM), dtype=np.float32),
+            pad=np.zeros((batch_size, NUM_TOKENS), dtype=bool),
+            actions=np.zeros((batch_size, K), dtype=np.int64),
+            policy=np.zeros((batch_size, K + 1, ACTION_SPACE_SIZE), dtype=np.float32),
+            policy_mask=np.zeros((batch_size, K + 1), dtype=np.float32),
+            value=np.zeros((batch_size, K + 1, 2), dtype=np.float32),
+            reward=np.zeros((batch_size, K + 1, 2), dtype=np.float32),
+            cur_off=np.zeros((batch_size, K + 1), dtype=np.int64),
+            winner=np.zeros((batch_size, K + 1, n), dtype=np.int64),
+            rank=np.zeros((batch_size, K + 1, n), dtype=np.int64),
+            in_game=np.zeros((batch_size, K + 1), dtype=np.float32),
+        )
+        egos = np.arange(n)
+        for b, (g, s) in enumerate(zip(gi, start)):
+            game, vt = self.games[g], self.value_targets[g]
+            T = len(game)
+            batch["feats"][b] = game.feats[s]
+            batch["pad"][b] = game.pad[s]
+            root = int(game.actor[s])
+            ranks = np.asarray(game.final_ranks, dtype=np.int64)
+            for k in range(K + 1):
+                t = s + k
+                if k > 0:
+                    # transition t-1 -> t, rewards for [actor of t-1, other]
+                    actor = game.actor[t - 1] if t - 1 < T else 0
+                    if t - 1 < T:
+                        r = game.rewards[t - 1]
+                        batch["reward"][b, k] = (r[actor], r[1 - actor])
+                # seat to move at step k; players alternate, so keep alternating past the end
+                mover = int(game.actor[t]) if t < T else (int(game.actor[T - 1]) + t - T + 1) % n
+                batch["cur_off"][b, k] = (mover - root) % n
+                ego_seats = (mover + egos) % n
+                batch["winner"][b, k] = max_players if game.winner < 0 else (game.winner - ego_seats) % n
+                batch["rank"][b, k] = ranks[ego_seats]
+                if t < T:
+                    batch["in_game"][b, k] = 1.0
+                    batch["policy"][b, k] = game.policies[t]
+                    batch["policy_mask"][b, k] = float(game.searched[t])
+                    batch["value"][b, k] = vt[t]
+                if k < K:
+                    batch["actions"][b, k] = game.actions[t] if t < T else 0
+        return batch

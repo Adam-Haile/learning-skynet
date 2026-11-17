@@ -1,4 +1,4 @@
-"""Batched Monte-Carlo tree search for MuZero (one tree per game, one network call per simulation).
+"""Batched Monte-Carlo tree search for SkyNet (one tree per game, one network call per simulation).
 
 Search treats the game as a two-player, general-sum tree. Node values are 2-vectors
 ``[player to move at the node, the other player]`` and the reward on the edge into a node is
@@ -10,6 +10,9 @@ Search treats the game as a two-player, general-sum tree. Node values are 2-vect
 
 Chance (the next draw) is not modelled explicitly; as in plain MuZero the dynamics model has to
 absorb it into the latent.
+
+Each node also records ``turn``, the seat to move there as an offset from the root observer
+(``depth % n_players``); the ego-conditioned prediction needs it to build ``e_current``.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ class MCTSConfig:
     discount: float = 1.0
     dirichlet_alpha: float = 0.3
     dirichlet_fraction: float = 0.25
+    n_players: int = 2
 
 
 class _MinMax:
@@ -46,9 +50,9 @@ class _MinMax:
 
 
 class _Node:
-    __slots__ = ("priors", "allowed", "children", "visits", "v0", "v1", "r0", "r1", "state")
+    __slots__ = ("priors", "allowed", "children", "visits", "v0", "v1", "r0", "r1", "state", "turn")
 
-    def __init__(self) -> None:
+    def __init__(self, turn: int = 0) -> None:
         self.priors = None
         self.allowed = None
         self.children = None
@@ -58,6 +62,7 @@ class _Node:
         self.r0 = 0.0  # reward on the edge into this node, for the player who acted
         self.r1 = 0.0
         self.state = None
+        self.turn = turn  # seat to move here, as an offset from the root observer
 
     @property
     def expanded(self) -> bool:
@@ -111,8 +116,11 @@ def run_mcts(
     ``[player to move, other player]``.
     """
     B = len(legal)
-    state, logits, value = net.initial_inference(torch.from_numpy(feats), torch.from_numpy(pad))
-    logits, value = logits.numpy(), value.numpy()
+    device = next(net.parameters()).device
+    state, logits, value = net.initial_inference(
+        torch.from_numpy(feats).to(device), torch.from_numpy(pad).to(device), n_players=cfg.n_players
+    )
+    logits, value = logits.cpu().numpy(), value.cpu().numpy()
 
     roots, minmax = [], []
     for b in range(B):
@@ -139,7 +147,7 @@ def run_mcts(
                 a = _select(node, cfg, minmax[b])
                 child = node.children[a]
                 if child is None:
-                    child = node.children[a] = _Node()
+                    child = node.children[a] = _Node((node.turn + 1) % cfg.n_players)
                 path.append(child)
                 if not child.expanded:
                     parents.append(node)
@@ -149,8 +157,11 @@ def run_mcts(
             paths.append(path)
 
         states = torch.stack([p.state for p in parents])
-        next_state, reward, logits, value = net.recurrent_inference(states, torch.tensor(actions))
-        reward, logits, value = reward.numpy(), logits.numpy(), value.numpy()
+        turns = torch.tensor([p[-1].turn for p in paths], device=device)
+        next_state, reward, logits, value = net.recurrent_inference(
+            states, torch.tensor(actions, device=device), turns, n_players=cfg.n_players
+        )
+        reward, logits, value = reward.cpu().numpy(), logits.cpu().numpy(), value.cpu().numpy()
         policy = np.exp(logits - logits.max(axis=1, keepdims=True))
         policy /= policy.sum(axis=1, keepdims=True)
 
