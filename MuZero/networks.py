@@ -18,6 +18,22 @@ HIDDEN_SIZE = 512
 ACTION_SPACE_SIZE = 7
 NUM_PLAYERS = 2
 
+# Shared scale for the dynamics rewards and prediction values.
+# The observed terminal rewards were roughly -68 to -5. This is an
+# experimental scale, not a guaranteed bound on the game's scores.
+# Keep environment rewards and score-based evaluation in original units.
+RETURN_SCALE = 70.0
+
+
+def to_model_scale(returns):
+    """Convert environment reward/return units to model units."""
+    return returns / RETURN_SCALE
+
+
+def to_environment_scale(predictions):
+    """Convert model reward/value predictions back to game units."""
+    return predictions * RETURN_SCALE
+
 # Transformer configuration
 TRANSFORMER_DIM = 256
 TRANSFORMER_HEADS = 8

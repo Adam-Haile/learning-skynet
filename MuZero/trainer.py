@@ -5,7 +5,8 @@ from MuZero.networks import (
     VALUE_MIN,
     VALUE_MAX,
     VALUE_SUPPORT_SIZE,
-    transform_value
+    transform_value,
+    to_model_scale
 )
 
 def rewards_as_list(rewards):
@@ -101,6 +102,7 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
         dtype=torch.float32,
         device=device
     )
+    target_value = to_model_scale(target_value)
 
     value_loss = categorical_value_loss(
         value_logits,
@@ -135,11 +137,12 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
             dtype=torch.float32,
             device=device
         )
+        actual_reward = to_model_scale(actual_reward)
 
         reward_loss = F.smooth_l1_loss(
             predicted_reward,
             actual_reward,
-            beta=5.0
+            beta=0.1
         )
 
         reward_losses.append(reward_loss)
@@ -159,6 +162,7 @@ def calculate_losses(model, game, start, unroll_steps=3, discount=1.0):
                 dtype=torch.float32,
                 device=device
             )
+            target_value = to_model_scale(target_value)
 
             value_loss = categorical_value_loss(
                 value_logits,
@@ -238,9 +242,33 @@ def train_unrolled_step(
     unroll_steps=3,
     discount=1.0,
     return_details=False,
-    terminal_probability=0.30
+    terminal_probability=0.30,
+    batch_size=1
 ):
-    """Train MuZero using a sampled game and starting turn."""
+    """Train on independent replay positions, batched for GPU throughput."""
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
+    if batch_size > 1:
+        samples = []
+        for game in random.choices(buffer.games, k=batch_size):
+            if random.random() < terminal_probability:
+                start = len(game) - 1
+            else:
+                start = random.randrange(len(game))
+            samples.append((game, start))
+
+        model.train()
+        losses = calculate_batched_losses(model, samples, unroll_steps, discount)
+        optimizer.zero_grad()
+        losses["total"].backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        optimizer.step()
+
+        if return_details:
+            return {key: value.item() for key, value in losses.items()}
+        return losses["total"].item()
 
     # Select a random game from the replay buffer
     game = buffer.sample_games(1)[0]
@@ -284,6 +312,115 @@ def train_unrolled_step(
         }
 
     return losses["total"].item()
+
+
+def _categorical_value_losses(value_logits, target_returns):
+    """Return one categorical value loss per sample, rather than a batch mean."""
+    compressed = transform_value(target_returns)
+    if torch.any((compressed < VALUE_MIN) | (compressed > VALUE_MAX)):
+        raise ValueError("Compressed return is outside the value support")
+
+    position = compressed - VALUE_MIN
+    lower = position.floor().long()
+    upper = position.ceil().long()
+    upper_weight = position - lower
+    distribution = torch.zeros_like(value_logits)
+    distribution.scatter_add_(-1, lower.unsqueeze(-1), (1 - upper_weight).unsqueeze(-1))
+    distribution.scatter_add_(-1, upper.unsqueeze(-1), upper_weight.unsqueeze(-1))
+    return -(distribution * F.log_softmax(value_logits, dim=-1)).sum(dim=-1).mean(dim=-1)
+
+
+def calculate_batched_losses(model, samples, unroll_steps=3, discount=1.0):
+    """Vectorized MuZero unroll over a batch of (game, start) samples.
+
+    Each loss is averaged across valid positions, matching calculate_losses().
+    Bot-controlled turns contribute value/reward loss, but no policy loss.
+    """
+    device = next(model.parameters()).device
+    batch_size = len(samples)
+    observations = torch.stack([
+        game[start]["observation"] for game, start in samples
+    ]).to(device)
+
+    hidden, policy, value, value_logits = model.initial_inference_with_logits(observations)
+    policy_sum = value_logits.sum() * 0.0
+    value_sum = value_logits.sum() * 0.0
+    reward_sum = value_logits.sum() * 0.0
+    policy_count = value_count = reward_count = 0
+
+    def add_policy(logits, offsets):
+        nonlocal policy_sum, policy_count
+        indices = []
+        targets = []
+        for b, (game, start) in enumerate(samples):
+            index = start + offsets
+            if index < len(game) and game[index].get("policy_valid", True):
+                indices.append(b)
+                targets.append(policy_target(game[index], device))
+        if indices:
+            selected = logits[indices]
+            target = torch.stack(targets)
+            policy_sum = policy_sum - (target * F.log_softmax(selected, dim=-1)).sum()
+            policy_count += len(indices)
+
+    def add_values(logits, offsets):
+        nonlocal value_sum, value_count
+        indices = []
+        targets = []
+        for b, (game, start) in enumerate(samples):
+            index = start + offsets
+            # Include the zero-value prediction immediately after termination.
+            if index <= len(game):
+                targets.append(
+                    future_returns(game, index, discount) if index < len(game) else [0.0, 0.0]
+                )
+                indices.append(b)
+        if indices:
+            target_tensor = to_model_scale(torch.tensor(targets, device=device, dtype=torch.float32))
+            value_sum = value_sum + _categorical_value_losses(logits[indices], target_tensor).sum()
+            value_count += len(indices)
+
+    add_policy(policy, 0)
+    add_values(value_logits, 0)
+
+    for offset in range(unroll_steps):
+        active = [
+            b for b, (game, start) in enumerate(samples)
+            if start + offset < len(game)
+        ]
+        if not active:
+            break
+
+        actions = torch.tensor([
+            game[start + offset]["action"] if start + offset < len(game) else 0
+            for game, start in samples
+        ], dtype=torch.long, device=device)
+        hidden, predicted_reward, policy, value, value_logits = (
+            model.recurrent_inference_with_logits(hidden, actions)
+        )
+        reward_targets = torch.tensor([
+            rewards_as_list(samples[b][0][samples[b][1] + offset]["rewards"])
+            for b in active
+        ], dtype=torch.float32, device=device)
+        reward_targets = to_model_scale(reward_targets)
+        reward_errors = F.smooth_l1_loss(
+            predicted_reward[active], reward_targets, beta=0.1, reduction="none"
+        ).mean(dim=-1)
+        reward_sum = reward_sum + reward_errors.sum()
+        reward_count += len(active)
+
+        add_policy(policy, offset + 1)
+        add_values(value_logits, offset + 1)
+
+    policy_loss = policy_sum / max(policy_count, 1)
+    value_loss = value_sum / value_count
+    reward_loss = reward_sum / reward_count
+    return {
+        "total": policy_loss + value_loss + reward_loss,
+        "policy": policy_loss,
+        "value": value_loss,
+        "reward": reward_loss,
+    }
 
 def validate_model(
     model,

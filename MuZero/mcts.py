@@ -265,6 +265,12 @@ def run_mcts(
     if encoded_observation.ndim == 1:
         encoded_observation = encoded_observation.unsqueeze(0)
 
+    # Observations are encoded on the CPU during environment interaction.
+    # Keep the search input on the same device as the neural network.
+    encoded_observation = encoded_observation.to(
+        next(model.parameters()).device
+    )
+
     # Disable training behavior during MCTS
     was_training = model.training
     model.eval()

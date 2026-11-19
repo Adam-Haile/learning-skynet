@@ -57,7 +57,8 @@ def play_game(
     model,
     seed=10,
     opponent_name=None,
-    explore=False
+    explore=False,
+    num_simulations=64
 ):
     """
     Generate a game for MuZero training.
@@ -120,7 +121,7 @@ def play_game(
                 encoded_observation=encoded_observation,
                 legal_actions=legal_actions,
                 current_player=player,
-                num_simulations=64,
+                num_simulations=num_simulations,
                 observation=observation,
                 game_config=env.config,
                 add_root_noise=explore,
